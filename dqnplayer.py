@@ -44,3 +44,5 @@ def feature(board,ind):
     return f
 
 
+def game():
+    pass
