@@ -13,9 +13,11 @@ from tqdm import tqdm
 import random
 from miwa.abplayer import abplayer
 import sys
+import mlplayer
 
 # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device=torch.device('cpu')
+device = torch.device('cpu')
+
 
 class FCN(nn.Module):
     def __init__(self, once=False):
@@ -45,11 +47,11 @@ class FCN(nn.Module):
         self.conv3d2 = nn.Conv3d(64, 32, kernel_size=2, stride=1)
         # 4x4x4
         self.bn3d2 = nn.BatchNorm3d(32)
-        self.conv3d3 = nn.Conv3d(32, 1, kernel_size=2, stride=1)
+        self.conv3d3 = nn.Conv3d(32, 2, kernel_size=2, stride=1)
         # 3x3x3
         self.drop = nn.Dropout3d(0.2)
 
-    def forward(self, x, mask):
+    def forward(self, x, mask, first=1):
         # TODO: concat order
         # input: batch x player x h x w x d
         num_player = x.size(1)
@@ -65,7 +67,7 @@ class FCN(nn.Module):
         x = F.relu(self.bn3d1(self.conv3d1(x)))
         x = F.relu(self.bn3d2(self.conv3d2(x)))
         x = self.drop(x)
-        x = self.conv3d3(x)
+        x = self.conv3d3(x)[:, first]
         x = x.squeeze(dim=1)
 
         # softmax
@@ -128,7 +130,7 @@ model = FCN(once=True).to(device)
 opt = optim.Adam(model.parameters())
 
 
-def mlplayer_once(msg, epsilon=0.95):
+def mlplayer_once(msg, epsilon=0.90):
     board = np.array(msg[1:])
     idx = msg[0]
     if not model.training:
@@ -142,7 +144,7 @@ def mlplayer_once(msg, epsilon=0.95):
         if mask.sum() == 0:
             return [-1, -1, -1]
         mask = mask.unsqueeze(0)
-        y = model(x, mask)
+        y = model(x, mask, idx % 2)
         y = y.squeeze()
         # print(y)
 
@@ -215,16 +217,19 @@ def beam_search(boards, num, depth, width):
 
 
 is_miwa = True
-miwa_dp = 4
+is_self = False
+miwa_dp = 1
 
 
-def train_once(opp):
+def train_once(opp, beta=0.01):
     model.train()
     opt.zero_grad()
 
     if is_miwa:
         miwa = abplayer('2 1 3', miwa_dp)
         opp = miwa.play
+    if is_self:
+        opp=mlplayer.mlplayer_once
     # first game
     res1 = game.game(opp, mlplayer_once)
     masks1 = model.get_masks()
@@ -238,21 +243,21 @@ def train_once(opp):
         for i, (p, m) in enumerate(zip(preds1, masks1)):
             p = p.squeeze()
             m = m.squeeze()
-            loss1 = (1 - p[line2index(p.argmax())])**2
-            # loss1 += p[m == 1].mean()
+            loss1 = (1 - p[line2index(p.argmax())])
+            loss1 += beta * p[m == 0].mean()
     elif res1 == 1:
         # if lose
         for i, (p, m) in enumerate(zip(preds1, masks1)):
             p = p.squeeze()
             m = m.squeeze()
-            loss1 = (p[line2index(p.argmax())] - 1)**2
-            # loss1 += p[m == 1].mean()
+            loss1 = (p[line2index(p.argmax())] - 1)
+            loss1 += beta * p[m == 0].mean()
     else:
         # if draw
         for i, (p, m) in enumerate(zip(preds1, masks1)):
             p = p.squeeze()
             m = m.squeeze()
-            loss1 = p[m == 1].mean()
+            loss1 = beta * p[m == 0].mean()
 
     # second game
     res2 = game.game(mlplayer_once, opp)
@@ -269,21 +274,21 @@ def train_once(opp):
         for i, (p, m) in enumerate(zip(preds2, masks2)):
             p = p.squeeze()
             m = m.squeeze()
-            loss2 = (1 - p[line2index(p.argmax())])**2
-            # loss2 += p[m == 1].mean()
+            loss2 = (1 - p[line2index(p.argmax())])
+            loss2 += beta * p[m == 0].mean()
     elif res2 == 0:
         # if win
         for i, (p, m) in enumerate(zip(preds2, masks2)):
             p = p.squeeze()
             m = m.squeeze()
-            loss2 = (p[line2index(p.argmax())] - 1)**2
-            # loss2 += p[m == 1].mean()
+            loss2 = (p[line2index(p.argmax())] - 1)
+            loss2 += beta * p[m == 0].mean()
     else:
         # if draw
         for i, (p, m) in enumerate(zip(preds2, masks2)):
             p = p.squeeze()
             m = m.squeeze()
-            loss2 = p[m == 1].mean()
+            loss2 = beta * p[m == 0].mean()
 
     # training
     loss = loss1 + loss2
